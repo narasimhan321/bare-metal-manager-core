@@ -767,9 +767,9 @@ fn get_firmware_components_for_device_type(
             ("BMC+FPGA+EROT", "BMC", "bmc"),
             ("BMC+FPGA+EROT", "FPGA", "fpga"),
             ("BMC+FPGA+EROT", "EROT", "erot"),
-            // CPLD — disabled: RMS does not support CPLD updates yet
-            // ("CPLD", "CPLD", "cpld"),
+            ("CPLD", "CPLD", "cpld"),
             ("SBIOS+EROT", "BIOS", "bios"),
+            ("NVOS", "NVOS", "nvos"),
         ],
         DeviceType::PowerShelf => vec![
             // Power Shelf firmware - found in GB200ComputeTray BoardSKU
@@ -1317,7 +1317,7 @@ pub async fn apply(
 
 fn get_firmware_flash_order(device_type_key: &str) -> &'static [&'static str] {
     match device_type_key {
-        "Switch Tray" => &["bmc", "fpga", "erot", "bios"],
+        "Switch Tray" => &["bmc", "fpga", "erot", "cpld", "bios", "nvos"],
         "Compute Node" => &["/redfish/v1/Chassis/HGX_Chassis_0", "FW_BMC_0"],
         _ => &[],
     }
@@ -1600,5 +1600,43 @@ mod tests {
 
         assert_eq!(parsed.board_skus.len(), 1);
         assert!(parsed.board_skus[0].firmware_components.is_empty());
+    }
+
+    #[test]
+    fn build_firmware_lookup_table_includes_switch_nvos_target() {
+        let parsed = ParsedFirmwareComponents {
+            board_skus: vec![BoardSkuFirmware {
+                sku_id: "920-9K36F-00MV-QS1".to_string(),
+                name: "P4978-Juliet_Switch_GB200".to_string(),
+                sku_type: "Switch Tray".to_string(),
+                firmware_components: vec![FirmwareComponent {
+                    component: "NVOS".to_string(),
+                    bundle: None,
+                    version: Some("25.02.4280".to_string()),
+                    component_type: Some("Prod".to_string()),
+                    locations: vec![FirmwareLocation {
+                        location: "https://example.com/release/25.02.4280/amd64/prod/nvos-amd64-25.02.4280.bin".to_string(),
+                        location_type: "HTTP".to_string(),
+                        firmware_type: Some("Firmware".to_string()),
+                    }],
+                    subcomponents: Vec::new(),
+                }],
+            }],
+        };
+
+        let lookup = build_firmware_lookup_table(&parsed);
+        let switch_entries = lookup
+            .devices
+            .get("Switch Tray")
+            .expect("switch tray lookup should exist");
+        let nvos = switch_entries
+            .get("NVOS_prod")
+            .expect("nvos prod entry should exist");
+
+        assert_eq!(nvos.target, "nvos");
+        assert_eq!(nvos.filename, "nvos-amd64-25.02.4280.bin");
+        assert_eq!(nvos.component, "NVOS");
+        assert_eq!(nvos.firmware_type, "prod");
+        assert_eq!(nvos.version.as_deref(), Some("25.02.4280"));
     }
 }
