@@ -102,6 +102,89 @@ struct FirmwareLookupEntry {
     subcomponents: Vec<FirmwareSubComponent>,
 }
 
+fn is_nvos_prod_binary_location(url: &str) -> bool {
+    let Some(filename) = url.rsplit('/').next() else {
+        return false;
+    };
+
+    url.contains("/amd64/prod/")
+        && filename.starts_with("nvos-amd64-")
+        && filename.ends_with(".bin")
+}
+
+fn extract_nvos_prod_component(board_sku: &Value, sku_id: &str) -> Option<FirmwareComponent> {
+    if get_device_type_from_skuid(sku_id) != DeviceType::JulietSwitch {
+        return None;
+    }
+
+    let software_components = board_sku
+        .get("Components")
+        .and_then(|c| c.get("Software"))
+        .and_then(|s| s.as_array())?;
+
+    for software in software_components {
+        if software.get("Component").and_then(|v| v.as_str()) != Some("NVOS") {
+            continue;
+        }
+
+        if software.get("Type").and_then(|v| v.as_str()) != Some("Prod") {
+            continue;
+        }
+
+        let empty_vec = vec![];
+        let locations_array = software
+            .get("Locations")
+            .and_then(|l| l.as_array())
+            .unwrap_or(&empty_vec);
+
+        let mut locations = Vec::new();
+        for location in locations_array {
+            let Some(url) = location.get("Location").and_then(|v| v.as_str()) else {
+                continue;
+            };
+
+            if !is_nvos_prod_binary_location(url) {
+                continue;
+            }
+
+            locations.push(FirmwareLocation {
+                location: url.to_string(),
+                location_type: location
+                    .get("LocationType")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string(),
+                // Reuse the existing firmware download and caching flow.
+                firmware_type: Some("Firmware".to_string()),
+            });
+        }
+
+        if locations.is_empty() {
+            continue;
+        }
+
+        return Some(FirmwareComponent {
+            component: "NVOS".to_string(),
+            bundle: software
+                .get("Bundle")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string()),
+            version: software
+                .get("Version")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string()),
+            component_type: software
+                .get("Type")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string()),
+            locations,
+            subcomponents: Vec::new(),
+        });
+    }
+
+    None
+}
+
 /// Parse rack firmware JSON to extract firmware components
 fn parse_rack_firmware_json(config: &Value) -> Result<ParsedFirmwareComponents, String> {
     let board_skus = config
@@ -130,7 +213,7 @@ fn parse_rack_firmware_json(config: &Value) -> Result<ParsedFirmwareComponents, 
             .unwrap_or("")
             .to_string();
 
-        // Get firmware components (ignore software)
+        // Get firmware components and selectively include NVOS prod software for GB200 switches.
         let firmware_array = board_sku
             .get("Components")
             .and_then(|c| c.get("Firmware"))
@@ -242,6 +325,10 @@ fn parse_rack_firmware_json(config: &Value) -> Result<ParsedFirmwareComponents, 
                     subcomponents,
                 });
             }
+        }
+
+        if let Some(nvos_component) = extract_nvos_prod_component(board_sku, &sku_id) {
+            firmware_components.push(nvos_component);
         }
 
         parsed_board_skus.push(BoardSkuFirmware {
@@ -1403,4 +1490,115 @@ pub async fn get_history(
         .collect();
 
     Ok(Response::new(RackFirmwareHistoryResponse { histories }))
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::*;
+
+    #[test]
+    fn parse_rack_firmware_json_extracts_only_nvos_prod_binary() {
+        let config = json!({
+            "BoardSKUs": [
+                {
+                    "SKUID": "920-9K36F-00MV-QS1",
+                    "Name": "P4978-Juliet_Switch_GB200",
+                    "Type": "Switch Tray",
+                    "Components": {
+                        "Software": [
+                            {
+                                "Component": "NVOS",
+                                "Version": "25.02.4280",
+                                "Type": "Prod",
+                                "Locations": [
+                                    {
+                                        "Location": "https://example.com/release/25.02.4280/GB200-P4978_0005_250825.1.0_prod-signed.corim",
+                                        "LocationType": "HTTPS"
+                                    },
+                                    {
+                                        "Location": "https://example.com/release/25.02.4280/amd64/prod/nvos-amd64-25.02.4280.bin",
+                                        "LocationType": "HTTP"
+                                    },
+                                    {
+                                        "Location": "https://example.com/release/25.02.4280/NVOS_Release_Notes.pdf",
+                                        "LocationType": "HTTPS"
+                                    },
+                                    {
+                                        "Location": "https://example.com/release/25.02.4280/openapi.json",
+                                        "LocationType": "HTTPS"
+                                    },
+                                    {
+                                        "Location": "https://example.com/release/25.02.4280/4.15.0-4300-3_yangs.zip",
+                                        "LocationType": "HTTPS"
+                                    }
+                                ]
+                            },
+                            {
+                                "Component": "NVOS",
+                                "Version": "25.02.4280",
+                                "Type": "Dev",
+                                "Locations": [
+                                    {
+                                        "Location": "https://example.com/release/25.02.4280/amd64/dev/nvos-amd64-25.02.4280.bin",
+                                        "LocationType": "HTTP"
+                                    }
+                                ]
+                            }
+                        ]
+                    }
+                }
+            ]
+        });
+
+        let parsed = parse_rack_firmware_json(&config).expect("should parse rack firmware json");
+
+        assert_eq!(parsed.board_skus.len(), 1);
+        assert_eq!(parsed.board_skus[0].firmware_components.len(), 1);
+
+        let nvos = &parsed.board_skus[0].firmware_components[0];
+        assert_eq!(nvos.component, "NVOS");
+        assert_eq!(nvos.component_type.as_deref(), Some("Prod"));
+        assert_eq!(nvos.version.as_deref(), Some("25.02.4280"));
+        assert_eq!(nvos.locations.len(), 1);
+        assert_eq!(
+            nvos.locations[0].location,
+            "https://example.com/release/25.02.4280/amd64/prod/nvos-amd64-25.02.4280.bin"
+        );
+        assert_eq!(nvos.locations[0].firmware_type.as_deref(), Some("Firmware"));
+    }
+
+    #[test]
+    fn parse_rack_firmware_json_skips_nvos_for_non_gb200_switch_skus() {
+        let config = json!({
+            "BoardSKUs": [
+                {
+                    "SKUID": "920-9K33D-00MV-GS0",
+                    "Name": "P4093-Juliet_Switch_GB300",
+                    "Type": "Switch Tray",
+                    "Components": {
+                        "Software": [
+                            {
+                                "Component": "NVOS",
+                                "Version": "25.02.4282",
+                                "Type": "Prod",
+                                "Locations": [
+                                    {
+                                        "Location": "https://example.com/release/25.02.4282/amd64/prod/nvos-amd64-25.02.4282.bin",
+                                        "LocationType": "HTTP"
+                                    }
+                                ]
+                            }
+                        ]
+                    }
+                }
+            ]
+        });
+
+        let parsed = parse_rack_firmware_json(&config).expect("should parse rack firmware json");
+
+        assert_eq!(parsed.board_skus.len(), 1);
+        assert!(parsed.board_skus[0].firmware_components.is_empty());
+    }
 }
