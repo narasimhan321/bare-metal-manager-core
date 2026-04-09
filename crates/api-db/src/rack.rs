@@ -202,6 +202,22 @@ pub async fn update_firmware_upgrade_job(
     Ok(())
 }
 
+pub async fn update_desired_switch_image_id(
+    txn: &mut PgConnection,
+    rack_id: &RackId,
+    desired_switch_image_id: Option<&str>,
+) -> DatabaseResult<()> {
+    let query =
+        "UPDATE racks SET desired_switch_image_id = $1, updated = NOW() WHERE id = $2 RETURNING id";
+    sqlx::query_as::<_, (RackId,)>(query)
+        .bind(desired_switch_image_id)
+        .bind(rack_id)
+        .fetch_one(txn)
+        .await
+        .map_err(|e| DatabaseError::new("update_desired_switch_image_id", e))?;
+    Ok(())
+}
+
 pub async fn final_delete(txn: &mut PgConnection, rack_id: &RackId) -> DatabaseResult<()> {
     let query = "DELETE from racks WHERE id=$1";
     sqlx::query(query)

@@ -83,6 +83,7 @@ pub mod route_servers;
 pub mod site_exploration_report;
 pub mod sku;
 pub mod switch;
+pub mod switch_image;
 pub mod switch_state_history;
 pub mod tenant;
 pub mod tenant_identity_config;

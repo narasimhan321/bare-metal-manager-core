@@ -89,6 +89,7 @@ pub mod site_explorer;
 pub mod sku;
 pub mod storage;
 pub mod switch;
+pub mod switch_image;
 pub mod tenant;
 pub mod trim_table;
 pub mod vpc;
