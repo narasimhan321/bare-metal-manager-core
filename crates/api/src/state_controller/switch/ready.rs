@@ -18,7 +18,9 @@
 //! Handler for SwitchControllerState::Ready.
 
 use carbide_uuid::switch::SwitchId;
-use model::switch::{ReProvisioningState, Switch, SwitchControllerState};
+use model::switch::{
+    ReProvisioningState, Switch, SwitchControllerState, SwitchReprovisionOperation,
+};
 
 use crate::state_controller::state_handler::{
     StateHandlerContext, StateHandlerError, StateHandlerOutcome,
@@ -40,12 +42,23 @@ pub async fn handle_ready(
 
     if let Some(req) = &state.switch_reprovisioning_requested {
         if req.initiator.starts_with("rack-") {
-            tracing::info!(
-                "Rack-level firmware upgrade requested — transitioning to WaitingForRackFirmwareUpgrade"
-            );
+            let reprovisioning_state = match req.operation {
+                SwitchReprovisionOperation::RackFirmwareUpgrade => {
+                    tracing::info!(
+                        "Rack-level firmware upgrade requested — transitioning to WaitingForRackFirmwareUpgrade"
+                    );
+                    ReProvisioningState::WaitingForRackFirmwareUpgrade
+                }
+                SwitchReprovisionOperation::OSUpdate => {
+                    tracing::info!(
+                        "Rack-level OS update requested — transitioning to OSUpdateStart"
+                    );
+                    ReProvisioningState::OSUpdateStart
+                }
+            };
             return Ok(StateHandlerOutcome::transition(
                 SwitchControllerState::ReProvisioning {
-                    reprovisioning_state: ReProvisioningState::WaitingForRackFirmwareUpgrade,
+                    reprovisioning_state,
                 },
             ));
         }
