@@ -103,13 +103,45 @@ pub struct SwitchStatus {
 
 /// Set by an external entity to request switch reprovisioning. When the switch is in Ready state,
 /// the state controller checks this flag and transitions to ReProvisioning::Start.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum SwitchReprovisionOperation {
+    #[default]
+    RackFirmwareUpgrade,
+    OSUpdate,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SwitchReprovisionRequest {
     pub requested_at: DateTime<Utc>,
     pub initiator: String,
+    #[serde(default)]
+    pub operation: SwitchReprovisionOperation,
 }
 
 pub use crate::rack::{RackFirmwareUpgradeState, RackFirmwareUpgradeStatus};
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SwitchOsUpdateState {
+    Pending,
+    Submitted,
+    InProgress,
+    Completed,
+    Failed { cause: String },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SwitchOsUpdateStatus {
+    pub switch_image_id: String,
+    pub image_version: String,
+    pub image_filename: String,
+    pub local_file_path: String,
+    pub job_id: String,
+    pub status: SwitchOsUpdateState,
+    pub status_message: Option<String>,
+    pub started_at: Option<DateTime<Utc>>,
+    pub ended_at: Option<DateTime<Utc>>,
+    pub result_json: Option<String>,
+}
 
 #[derive(Debug, Clone)]
 pub struct Switch {
@@ -133,6 +165,9 @@ pub struct Switch {
     /// Firmware upgrade status during ReProvisioning, set by the rack state machine.
     pub firmware_upgrade_status: Option<RackFirmwareUpgradeStatus>,
 
+    /// Switch OS update status during ReProvisioning.
+    pub os_update_status: Option<SwitchOsUpdateStatus>,
+
     /// The rack that this switch is associated with.
     pub rack_id: Option<RackId>,
     // Columns for these exist, but are unused in rust code
@@ -154,6 +189,8 @@ impl<'r> FromRow<'r, PgRow> for Switch {
             row.try_get("switch_reprovisioning_requested").ok();
         let firmware_upgrade_status: Option<sqlx::types::Json<RackFirmwareUpgradeStatus>> =
             row.try_get("firmware_upgrade_status").ok();
+        let os_update_status: Option<sqlx::types::Json<SwitchOsUpdateStatus>> =
+            row.try_get("os_update_status").ok();
 
         let labels: sqlx::types::Json<HashMap<String, String>> = row.try_get("labels")?;
         let metadata = Metadata {
@@ -174,6 +211,7 @@ impl<'r> FromRow<'r, PgRow> for Switch {
             controller_state_outcome: controller_state_outcome.map(|o| o.0),
             switch_reprovisioning_requested: switch_reprovisioning_requested.map(|j| j.0),
             firmware_upgrade_status: firmware_upgrade_status.map(|j| j.0),
+            os_update_status: os_update_status.map(|j| j.0),
             metadata,
             version: row.try_get("version")?,
             rack_id: row.try_get("rack_id").ok().flatten(),
@@ -286,6 +324,10 @@ pub enum ReProvisioningState {
     /// Rack-level firmware upgrade in progress; the rack state machine manages the
     /// upgrade and clears `switch_reprovisioning_requested` when done.
     WaitingForRackFirmwareUpgrade,
+    /// Submit a one-switch RMS system image update job.
+    OSUpdateStart,
+    /// Wait for the one-switch RMS system image update job to complete.
+    OSUpdateWait,
 }
 
 /// State of a Switch as tracked by the controller
@@ -434,6 +476,7 @@ mod tests {
             }),
             switch_reprovisioning_requested: None,
             firmware_upgrade_status: None,
+            os_update_status: None,
             metadata: Metadata::default(),
             version: ConfigVersion::initial(),
             rack_id: None,
@@ -473,6 +516,7 @@ mod tests {
             }),
             switch_reprovisioning_requested: None,
             firmware_upgrade_status: None,
+            os_update_status: None,
             metadata: Metadata::default(),
             version: ConfigVersion::initial(),
             rack_id: None,
@@ -523,6 +567,18 @@ mod tests {
             serde_json::from_str::<SwitchControllerState>(&serialized).unwrap(),
             state
         );
+        let state = SwitchControllerState::ReProvisioning {
+            reprovisioning_state: ReProvisioningState::OSUpdateStart,
+        };
+        let serialized = serde_json::to_string(&state).unwrap();
+        assert_eq!(
+            serialized,
+            "{\"state\":\"reprovisioning\",\"reprovisioning_state\":\"OSUpdateStart\"}"
+        );
+        assert_eq!(
+            serde_json::from_str::<SwitchControllerState>(&serialized).unwrap(),
+            state
+        );
         let state = SwitchControllerState::Ready;
         let serialized = serde_json::to_string(&state).unwrap();
         assert_eq!(serialized, "{\"state\":\"ready\"}");
@@ -545,6 +601,20 @@ mod tests {
         assert_eq!(
             serde_json::from_str::<SwitchControllerState>(&serialized).unwrap(),
             state
+        );
+    }
+
+    #[test]
+    fn deserialize_legacy_switch_reprovision_request_defaults_operation() {
+        let legacy_json = format!(
+            "{{\"requested_at\":\"{}\",\"initiator\":\"rack-test\"}}",
+            Utc::now().to_rfc3339()
+        );
+
+        let request: SwitchReprovisionRequest = serde_json::from_str(&legacy_json).unwrap();
+        assert_eq!(
+            request.operation,
+            SwitchReprovisionOperation::RackFirmwareUpgrade
         );
     }
 }

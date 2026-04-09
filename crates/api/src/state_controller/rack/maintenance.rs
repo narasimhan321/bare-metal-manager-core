@@ -32,6 +32,7 @@ use model::rack::{
     RackFirmwareUpgradeState, RackFirmwareUpgradeStatus, RackMaintenanceState, RackPowerState,
     RackState, RackValidationState,
 };
+use model::switch::SwitchReprovisionOperation;
 
 use crate::state_controller::rack::context::RackStateHandlerContextObjects;
 use crate::state_controller::rack::validating::strip_rv_labels;
@@ -250,6 +251,7 @@ pub async fn handle_maintenance(
                             txn.as_mut(),
                             *switch_id,
                             &format!("rack-{}", id),
+                            SwitchReprovisionOperation::RackFirmwareUpgrade,
                         )
                         .await?;
                     }

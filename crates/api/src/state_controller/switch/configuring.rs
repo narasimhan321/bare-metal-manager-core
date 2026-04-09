@@ -39,10 +39,8 @@ pub async fn handle_configuring(
     match config_state {
         ConfiguringState::RotateOsPassword => {
             tracing::info!("Configuring Switch: RotateOsPassword");
-            // TODO: Rotate OS password. Then transition to Validating.
             Ok(StateHandlerOutcome::transition(
                 SwitchControllerState::Validating {
-                    // TODO: Implement validation logic.
                     validating_state: ValidatingState::ValidationComplete,
                 },
             ))

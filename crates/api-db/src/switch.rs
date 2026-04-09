@@ -24,7 +24,10 @@ use futures::StreamExt;
 use model::controller_outcome::PersistentStateHandlerOutcome;
 use model::metadata::Metadata;
 use model::rack::RackFirmwareUpgradeStatus;
-use model::switch::{NewSwitch, Switch, SwitchControllerState, SwitchReprovisionRequest};
+use model::switch::{
+    NewSwitch, Switch, SwitchControllerState, SwitchOsUpdateStatus, SwitchReprovisionOperation,
+    SwitchReprovisionRequest,
+};
 use sqlx::PgConnection;
 
 use crate::db_read::DbReader;
@@ -108,6 +111,7 @@ pub async fn create(txn: &mut PgConnection, new_switch: &NewSwitch) -> DatabaseR
         controller_state_outcome: None,
         switch_reprovisioning_requested: None,
         firmware_upgrade_status: None,
+        os_update_status: None,
         metadata,
         version,
         rack_id: new_switch.rack_id.clone(),
@@ -256,10 +260,12 @@ pub async fn set_switch_reprovisioning_requested(
     txn: &mut PgConnection,
     switch_id: SwitchId,
     initiator: &str,
+    operation: SwitchReprovisionOperation,
 ) -> DatabaseResult<()> {
     let req = SwitchReprovisionRequest {
         requested_at: Utc::now(),
         initiator: initiator.to_string(),
+        operation,
     };
     let query =
         "UPDATE switches SET switch_reprovisioning_requested = $1 WHERE id = $2 RETURNING id";
@@ -302,6 +308,23 @@ pub async fn update_firmware_upgrade_status(
         .fetch_optional(txn)
         .await
         .map_err(|e| DatabaseError::new("update_firmware_upgrade_status", e))?;
+    Ok(())
+}
+
+/// Sets os_update_status on the switch. Call from any state machine or service to report
+/// switch OS update progress.
+pub async fn update_os_update_status(
+    txn: &mut PgConnection,
+    switch_id: SwitchId,
+    status: Option<&SwitchOsUpdateStatus>,
+) -> DatabaseResult<()> {
+    let query = "UPDATE switches SET os_update_status = $1 WHERE id = $2 RETURNING id";
+    sqlx::query_as::<_, SwitchId>(query)
+        .bind(status.map(|s| sqlx::types::Json(s.clone())))
+        .bind(switch_id)
+        .fetch_optional(txn)
+        .await
+        .map_err(|e| DatabaseError::new("update_os_update_status", e))?;
     Ok(())
 }
 

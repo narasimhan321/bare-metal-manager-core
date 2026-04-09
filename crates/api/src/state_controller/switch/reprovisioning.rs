@@ -45,5 +45,11 @@ pub async fn handle_reprovisioning(
             db_switch::clear_switch_reprovisioning_requested(txn.as_mut(), *switch_id).await?;
             Ok(StateHandlerOutcome::transition(SwitchControllerState::Ready).with_txn(txn))
         }
+        ReProvisioningState::OSUpdateStart => Ok(StateHandlerOutcome::wait(
+            "switch OS update reprovisioning is not implemented yet".into(),
+        )),
+        ReProvisioningState::OSUpdateWait => Ok(StateHandlerOutcome::wait(
+            "waiting for switch OS update implementation".into(),
+        )),
     }
 }
