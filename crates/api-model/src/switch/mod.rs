@@ -131,11 +131,12 @@ pub enum SwitchOsUpdateState {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SwitchOsUpdateStatus {
-    pub switch_image_id: String,
+    #[serde(alias = "switch_image_id")]
+    pub rack_firmware_id: String,
     pub image_version: String,
     pub image_filename: String,
     pub local_file_path: String,
-    pub job_id: String,
+    pub job_id: Option<String>,
     pub status: SwitchOsUpdateState,
     pub status_message: Option<String>,
     pub started_at: Option<DateTime<Utc>>,
@@ -616,5 +617,25 @@ mod tests {
             request.operation,
             SwitchReprovisionOperation::RackFirmwareUpgrade
         );
+    }
+
+    #[test]
+    fn deserialize_legacy_switch_os_update_status_switch_image_id_alias() {
+        let legacy_json = r#"{
+            "switch_image_id":"fw-001",
+            "image_version":"25.02.2553",
+            "image_filename":"nvos-amd64-25.02.2553.bin",
+            "local_file_path":"/forge-boot-artifacts/blobs/internal/fw/rack_firmware/fw-001/nvos-amd64-25.02.2553.bin",
+            "job_id":"job-123",
+            "status":"Pending",
+            "status_message":"pending",
+            "started_at":null,
+            "ended_at":null,
+            "result_json":null
+        }"#;
+
+        let status: SwitchOsUpdateStatus = serde_json::from_str(legacy_json).unwrap();
+        assert_eq!(status.rack_firmware_id, "fw-001");
+        assert_eq!(status.job_id.as_deref(), Some("job-123"));
     }
 }

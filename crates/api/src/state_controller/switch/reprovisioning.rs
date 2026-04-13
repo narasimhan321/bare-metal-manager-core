@@ -18,9 +18,16 @@
 //! Handler for SwitchControllerState::ReProvisioning.
 
 use carbide_uuid::switch::SwitchId;
+use chrono::Utc;
+use db::rack as db_rack;
 use db::switch as db_switch;
-use model::switch::{ReProvisioningState, Switch, SwitchControllerState};
+use eyre::eyre;
+use model::switch::{
+    ReProvisioningState, Switch, SwitchControllerState, SwitchOsUpdateState,
+    SwitchOsUpdateStatus,
+};
 
+use crate::rack::switch_system_image;
 use crate::state_controller::state_handler::{
     StateHandlerContext, StateHandlerError, StateHandlerOutcome,
 };
@@ -45,11 +52,68 @@ pub async fn handle_reprovisioning(
             db_switch::clear_switch_reprovisioning_requested(txn.as_mut(), *switch_id).await?;
             Ok(StateHandlerOutcome::transition(SwitchControllerState::Ready).with_txn(txn))
         }
-        ReProvisioningState::OSUpdateStart => Ok(StateHandlerOutcome::wait(
-            "switch OS update reprovisioning is not implemented yet".into(),
-        )),
+        ReProvisioningState::OSUpdateStart => {
+            let rack_id = state
+                .rack_id
+                .as_ref()
+                .ok_or_else(|| StateHandlerError::MissingData {
+                    object_id: switch_id.to_string(),
+                    missing: "rack_id",
+                })?;
+
+            let mut txn = ctx.services.db_pool.begin().await?;
+            let rack = db_rack::get(txn.as_mut(), rack_id).await?;
+            let resolved = switch_system_image::resolve_desired_switch_system_image(
+                txn.as_mut(),
+                &rack,
+                None,
+            )
+            .await
+            .map_err(|e| {
+                StateHandlerError::GenericError(eyre!(
+                    "failed to resolve desired switch system image for rack {}: {}",
+                    rack.id,
+                    e
+                ))
+            })?;
+
+            let rack_firmware_id = rack
+                .desired_switch_nvos_firmware_id
+                .clone()
+                .ok_or_else(|| StateHandlerError::GenericError(eyre!(
+                    "rack {} has no desired_switch_nvos_firmware_id",
+                    rack.id
+                )))?;
+
+            let os_update_status = SwitchOsUpdateStatus {
+                rack_firmware_id,
+                image_version: resolved.version,
+                image_filename: resolved.image_filename,
+                local_file_path: resolved.local_file_path,
+                job_id: None,
+                status: SwitchOsUpdateState::Pending,
+                status_message: Some(
+                    "prepared switch OS update request from rack_firmware; RMS submission is pending"
+                        .to_string(),
+                ),
+                started_at: Some(Utc::now()),
+                ended_at: None,
+                result_json: None,
+            };
+
+            db_switch::update_os_update_status(txn.as_mut(), *switch_id, Some(&os_update_status))
+                .await?;
+
+            Ok(StateHandlerOutcome::transition(
+                SwitchControllerState::ReProvisioning {
+                    reprovisioning_state: ReProvisioningState::OSUpdateWait,
+                },
+            )
+            .with_txn(txn))
+        }
         ReProvisioningState::OSUpdateWait => Ok(StateHandlerOutcome::wait(
-            "waiting for switch OS update implementation".into(),
+            "switch OS update request is prepared; waiting for RMS submission/polling implementation"
+                .into(),
         )),
     }
 }
