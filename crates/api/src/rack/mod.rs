@@ -16,3 +16,4 @@
  */
 
 pub mod rms_client;
+pub mod switch_system_image;

@@ -37,7 +37,7 @@ pub struct Rack {
     pub controller_state: Versioned<RackState>,
     pub controller_state_outcome: Option<PersistentStateHandlerOutcome>,
     pub firmware_upgrade_job: Option<FirmwareUpgradeJob>,
-    pub desired_switch_image_id: Option<String>,
+    pub desired_switch_nvos_firmware_id: Option<String>,
     pub health_report_overrides: HealthReportOverrides,
     pub created: DateTime<Utc>,
     pub updated: DateTime<Utc>,
@@ -199,8 +199,10 @@ impl<'r> FromRow<'r, PgRow> for Rack {
             .ok()
             .flatten()
             .map(|j| j.0);
-        let desired_switch_image_id: Option<String> =
-            row.try_get("desired_switch_image_id").ok().flatten();
+        let desired_switch_nvos_firmware_id: Option<String> = row
+            .try_get("desired_switch_nvos_firmware_id")
+            .ok()
+            .flatten();
         Ok(Rack {
             id: row.try_get("id")?,
             config: config.0,
@@ -210,7 +212,7 @@ impl<'r> FromRow<'r, PgRow> for Rack {
             },
             controller_state_outcome: controller_state_outcome.map(|o| o.0),
             firmware_upgrade_job,
-            desired_switch_image_id,
+            desired_switch_nvos_firmware_id,
             health_report_overrides,
             created: row.try_get("created")?,
             updated: row.try_get("updated")?,
