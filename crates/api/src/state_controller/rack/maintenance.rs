@@ -25,9 +25,15 @@ use db::{
 };
 use forge_secrets::credentials::{CredentialKey, CredentialManager, Credentials};
 use model::rack::{
+<<<<<<< HEAD
     FirmwareUpgradeDeviceStatus, FirmwareUpgradeState, NvosUpdateJob, NvosUpdateState, NvosUpdateSwitchInfo,
     NvosUpdateSwitchStatus, Rack, RackConfig, RackFirmwareUpgradeState,
     RackFirmwareUpgradeStatus, RackMaintenanceState, RackNvosUpdateState,
+=======
+    FirmwareUpgradeDeviceInfo, FirmwareUpgradeDeviceStatus, FirmwareUpgradeState, NvosUpdateJob,
+    NvosUpdateState, NvosUpdateSwitchInfo, NvosUpdateSwitchStatus, Rack, RackConfig,
+    RackFirmwareUpgradeState, RackFirmwareUpgradeStatus, RackMaintenanceState, RackNvosUpdateState,
+>>>>>>> 8f0221f25 (taplo fmt check)
     RackNvosUpdateStatus, RackPowerState, RackState, RackValidationState,
 };
 use model::rack_firmware::{RackFirmware, RackFirmwareSearchFilter};
@@ -136,8 +142,8 @@ fn preferred_nvos_lookup_keys(
     ctx: &StateHandlerContext<'_, RackStateHandlerContextObjects>,
 ) -> Vec<String> {
     let mut keys = Vec::new();
-    if let Some(class) = super::resolve_capabilities(id, config, ctx)
-        .and_then(|caps| caps.rack_hardware_class)
+    if let Some(class) =
+        super::resolve_capabilities(id, config, ctx).and_then(|caps| caps.rack_hardware_class)
     {
         keys.push(format!("NVOS_{}", class));
     }
@@ -850,22 +856,24 @@ pub async fn handle_maintenance(
                 db_rack::update_firmware_upgrade_job(txn.as_mut(), id, None).await?;
                 state.firmware_upgrade_job = None;
 
-                let next_maintenance_state =
-                    if resolve_default_nvos_artifact(id, config, ctx).await?.is_some() {
-                        tracing::info!(
-                            "Rack {} has a default NVOS artifact available; advancing to NVOSUpdate(Start)",
-                            id
-                        );
-                        RackMaintenanceState::NVOSUpdate {
-                            nvos_update: NvosUpdateState::Start,
-                        }
-                    } else {
-                        tracing::info!(
-                            "Rack {} has no default NVOS artifact available; skipping NVOSUpdate",
-                            id
-                        );
-                        RackMaintenanceState::ConfigureNmxCluster
-                    };
+                let next_maintenance_state = if resolve_default_nvos_artifact(id, config, ctx)
+                    .await?
+                    .is_some()
+                {
+                    tracing::info!(
+                        "Rack {} has a default NVOS artifact available; advancing to NVOSUpdate(Start)",
+                        id
+                    );
+                    RackMaintenanceState::NVOSUpdate {
+                        nvos_update: NvosUpdateState::Start,
+                    }
+                } else {
+                    tracing::info!(
+                        "Rack {} has no default NVOS artifact available; skipping NVOSUpdate",
+                        id
+                    );
+                    RackMaintenanceState::ConfigureNmxCluster
+                };
 
                 Ok(StateHandlerOutcome::transition(RackState::Maintenance {
                     maintenance_state: next_maintenance_state,
@@ -918,12 +926,14 @@ pub async fn handle_maintenance(
                         ))
                     })?;
                     let (nvos_username, nvos_password) =
-                        fetch_nvos_credentials(cred_mgr, switch.bmc_mac).await.ok_or_else(|| {
-                            StateHandlerError::GenericError(eyre::eyre!(
-                                "no NVOS admin credentials in vault for switch {}",
-                                switch.bmc_mac
-                            ))
-                        })?;
+                        fetch_nvos_credentials(cred_mgr, switch.bmc_mac)
+                            .await
+                            .ok_or_else(|| {
+                                StateHandlerError::GenericError(eyre::eyre!(
+                                    "no NVOS admin credentials in vault for switch {}",
+                                    switch.bmc_mac
+                                ))
+                            })?;
                     switches.push(NvosUpdateSwitchInfo {
                         mac: switch.bmc_mac.to_string(),
                         bmc_ip: switch.bmc_ip.to_string(),

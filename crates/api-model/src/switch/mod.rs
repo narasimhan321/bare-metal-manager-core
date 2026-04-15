@@ -115,8 +115,7 @@ pub struct SwitchReprovisionRequest {
 }
 
 pub use crate::rack::{
-    RackFirmwareUpgradeState, RackFirmwareUpgradeStatus, RackNvosUpdateState,
-    RackNvosUpdateStatus,
+    RackFirmwareUpgradeState, RackFirmwareUpgradeStatus, RackNvosUpdateState, RackNvosUpdateStatus,
 };
 
 #[derive(Debug, Clone)]

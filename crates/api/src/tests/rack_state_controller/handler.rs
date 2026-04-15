@@ -25,9 +25,14 @@ use db::{
 use model::expected_machine::ExpectedMachineData;
 use model::expected_rack::ExpectedRack;
 use model::rack::{
+<<<<<<< HEAD
     FirmwareUpgradeDeviceStatus, FirmwareUpgradeJob, FirmwareUpgradeState, Rack, RackConfig,
     NvosUpdateState, RackFirmwareUpgradeState, RackMaintenanceState, RackPowerState, RackState,
     RackValidationState,
+=======
+    FirmwareUpgradeState, NvosUpdateState, Rack, RackConfig, RackMaintenanceState, RackPowerState,
+    RackState, RackValidationState,
+>>>>>>> 8f0221f25 (taplo fmt check)
 };
 use model::rack_type::{
     RackCapabilitiesSet, RackCapabilityCompute, RackCapabilityPowerShelf, RackCapabilitySwitch,
