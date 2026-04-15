@@ -18,12 +18,16 @@
 use carbide_uuid::machine::{MachineId, MachineIdSource, MachineType};
 use carbide_uuid::rack::RackId;
 use db::db_read::DbReader;
-use db::{ObjectColumnFilter, expected_rack as db_expected_rack, rack as db_rack};
+use db::{
+    ObjectColumnFilter, expected_rack as db_expected_rack, rack as db_rack,
+    rack_firmware as db_rack_firmware,
+};
 use model::expected_machine::ExpectedMachineData;
 use model::expected_rack::ExpectedRack;
 use model::rack::{
     FirmwareUpgradeDeviceStatus, FirmwareUpgradeJob, FirmwareUpgradeState, Rack, RackConfig,
-    RackFirmwareUpgradeState, RackMaintenanceState, RackPowerState, RackState, RackValidationState,
+    NvosUpdateState, RackFirmwareUpgradeState, RackMaintenanceState, RackPowerState, RackState,
+    RackValidationState,
 };
 use model::rack_type::{
     RackCapabilitiesSet, RackCapabilityCompute, RackCapabilityPowerShelf, RackCapabilitySwitch,
@@ -273,6 +277,39 @@ async fn create_expected_rack(pool: &sqlx::PgPool, rack_id: &RackId, rack_type: 
         ..Default::default()
     };
     db_expected_rack::create(&mut txn, &er).await.unwrap();
+}
+
+async fn create_default_nvos_rack_firmware(pool: &sqlx::PgPool, firmware_id: &str) {
+    let mut txn = pool.acquire().await.unwrap();
+    db_rack_firmware::create(
+        &mut txn,
+        firmware_id,
+        RackHardwareType::any(),
+        json!({ "Id": firmware_id }),
+        Some(json!({
+            "devices": {},
+            "switch_system_images": {
+                "Switch Tray": {
+                    "NVOS_prod": {
+                        "component": "NVOS",
+                        "package_name": "GB200NVL72_NVOS",
+                        "version": "25.02.2553",
+                        "image_filename": "nvos-amd64-25.02.2553.bin",
+                        "location_type": "HTTPS",
+                        "firmware_type": "prod"
+                    }
+                }
+            }
+        })),
+    )
+    .await
+    .unwrap();
+    db_rack_firmware::set_available(&mut txn, firmware_id, true)
+        .await
+        .unwrap();
+    db_rack_firmware::set_default(&mut txn, firmware_id)
+        .await
+        .unwrap();
 }
 
 pub(crate) fn new_machine_id(seed: u8) -> MachineId {
@@ -1719,6 +1756,81 @@ async fn test_firmware_upgrade_wait_for_complete_retries_on_transient_poll_error
             .as_deref()
             .is_some_and(|message| message.contains("mock transport failure"))
     );
+
+    Ok(())
+}
+
+/// test_nvos_update_start_transitions_to_wait_for_complete verifies that
+/// Maintenance::NVOSUpdate(Start) transitions to WaitForComplete when a
+/// default NVOS-capable rack_firmware entry exists.
+#[crate::sqlx_test]
+async fn test_nvos_update_start_transitions_to_wait_for_complete(
+    pool: sqlx::PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let env = create_test_env_with_overrides(pool.clone(), TestEnvOverrides::default()).await;
+
+    let rack_id = new_rack_id();
+    let mut txn = pool.acquire().await?;
+    db_rack::create(
+        &mut txn,
+        &rack_id,
+        &RackConfig {
+            rack_type: Some("Empty".to_string()),
+            ..Default::default()
+        },
+        None,
+    )
+    .await?;
+    drop(txn);
+
+    create_default_nvos_rack_firmware(&pool, "fw-nvos-default").await;
+
+    let mut rack = get_db_rack(env.db_reader().as_mut(), &rack_id).await;
+
+    let handler_instance = RackStateHandler::default();
+    let mut services = env.state_handler_services();
+    let mut metrics = ();
+    let mut db_writes = DbWriteBatch::default();
+    let mut ctx = StateHandlerContext::<RackStateHandlerContextObjects> {
+        services: &mut services,
+        metrics: &mut metrics,
+        pending_db_writes: &mut db_writes,
+    };
+
+    let nvos_state = RackState::Maintenance {
+        maintenance_state: RackMaintenanceState::NVOSUpdate {
+            nvos_update: NvosUpdateState::Start,
+        },
+    };
+    let outcome = handler_instance
+        .handle_object_state(&rack_id, &mut rack, &nvos_state, &mut ctx)
+        .await?;
+
+    assert!(
+        rack.nvos_update_job.is_some(),
+        "NVOSUpdate(Start) should populate rack.nvos_update_job"
+    );
+
+    match outcome {
+        StateHandlerOutcome::Transition { next_state, .. } => {
+            assert!(
+                matches!(
+                    next_state,
+                    RackState::Maintenance {
+                        maintenance_state: RackMaintenanceState::NVOSUpdate {
+                            nvos_update: NvosUpdateState::WaitForComplete,
+                        },
+                    }
+                ),
+                "NVOSUpdate(Start) should transition to WaitForComplete, got {:?}",
+                next_state
+            );
+        }
+        other => panic!(
+            "Expected Transition, got {:?}",
+            std::mem::discriminant(&other)
+        ),
+    }
 
     Ok(())
 }

@@ -23,11 +23,15 @@ use db::{
     machine_topology as db_machine_topology, rack as db_rack, rack_firmware as db_rack_firmware,
     switch as db_switch,
 };
+use forge_secrets::credentials::{CredentialKey, CredentialManager, Credentials};
 use model::rack::{
-    FirmwareUpgradeDeviceStatus, FirmwareUpgradeState, Rack, RackConfig, RackFirmwareUpgradeState,
-    RackFirmwareUpgradeStatus, RackMaintenanceState, RackPowerState, RackState,
-    RackValidationState,
+    FirmwareUpgradeDeviceStatus, FirmwareUpgradeState, NvosUpdateJob, NvosUpdateState, NvosUpdateSwitchInfo,
+    NvosUpdateSwitchStatus, Rack, RackConfig, RackFirmwareUpgradeState,
+    RackFirmwareUpgradeStatus, RackMaintenanceState, RackNvosUpdateState,
+    RackNvosUpdateStatus, RackPowerState, RackState, RackValidationState,
 };
+use model::rack_firmware::{RackFirmware, RackFirmwareSearchFilter};
+use model::rack_type::RackHardwareType;
 
 use crate::rack::firmware_update::{
     build_firmware_update_batches, firmware_type_for_capabilities, load_rack_firmware_inventory,
@@ -89,6 +93,149 @@ async fn trigger_rack_firmware_reprovisioning_requests(
         .await?;
     }
     Ok(())
+}
+
+/// Fetches switch NVOS admin credentials from Vault for the given BMC MAC.
+/// Returns `None` if not found.
+async fn fetch_nvos_credentials(
+    credential_manager: &dyn CredentialManager,
+    bmc_mac: mac_address::MacAddress,
+) -> Option<(String, String)> {
+    let key = CredentialKey::SwitchNvosAdmin {
+        bmc_mac_address: bmc_mac,
+    };
+    match credential_manager.get_credentials(&key).await {
+        Ok(Some(Credentials::UsernamePassword { username, password })) => {
+            Some((username, password))
+        }
+        _ => None,
+    }
+}
+
+#[derive(Debug, Clone)]
+struct ResolvedNvosArtifact {
+    firmware_id: String,
+    image_filename: String,
+    local_file_path: String,
+    version: Option<String>,
+}
+
+fn desired_rack_hardware_type(
+    id: &RackId,
+    config: &RackConfig,
+    ctx: &StateHandlerContext<'_, RackStateHandlerContextObjects>,
+) -> RackHardwareType {
+    super::resolve_capabilities(id, config, ctx)
+        .and_then(|caps| caps.rack_hardware_type.clone())
+        .unwrap_or_else(RackHardwareType::any)
+}
+
+fn preferred_nvos_lookup_keys(
+    id: &RackId,
+    config: &RackConfig,
+    ctx: &StateHandlerContext<'_, RackStateHandlerContextObjects>,
+) -> Vec<String> {
+    let mut keys = Vec::new();
+    if let Some(class) = super::resolve_capabilities(id, config, ctx)
+        .and_then(|caps| caps.rack_hardware_class)
+    {
+        keys.push(format!("NVOS_{}", class));
+    }
+    if !keys.iter().any(|key| key == "NVOS_prod") {
+        keys.push("NVOS_prod".to_string());
+    }
+    keys
+}
+
+fn resolve_nvos_artifact_from_firmware(
+    firmware: &RackFirmware,
+    lookup_keys: &[String],
+) -> Result<Option<ResolvedNvosArtifact>, StateHandlerError> {
+    let Some(parsed_components) = firmware.parsed_components.as_ref().map(|json| &json.0) else {
+        return Ok(None);
+    };
+
+    let images = parsed_components
+        .get("switch_system_images")
+        .and_then(|value| value.get("Switch Tray"));
+
+    let Some(images) = images else {
+        return Ok(None);
+    };
+
+    for lookup_key in lookup_keys {
+        let Some(entry) = images.get(lookup_key) else {
+            continue;
+        };
+
+        let image_filename = entry
+            .get("image_filename")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| {
+                StateHandlerError::GenericError(eyre::eyre!(
+                    "rack firmware {} has malformed {} lookup entry: missing image_filename",
+                    firmware.id,
+                    lookup_key
+                ))
+            })?;
+
+        let version = entry
+            .get("version")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string);
+
+        return Ok(Some(ResolvedNvosArtifact {
+            firmware_id: firmware.id.clone(),
+            image_filename: image_filename.to_string(),
+            local_file_path: format!(
+                "/forge-boot-artifacts/blobs/internal/fw/rack_firmware/{}/{}",
+                firmware.id, image_filename
+            ),
+            version,
+        }));
+    }
+
+    Ok(None)
+}
+
+async fn resolve_default_nvos_artifact(
+    id: &RackId,
+    config: &RackConfig,
+    ctx: &mut StateHandlerContext<'_, RackStateHandlerContextObjects>,
+) -> Result<Option<ResolvedNvosArtifact>, StateHandlerError> {
+    let desired_hw_type = desired_rack_hardware_type(id, config, ctx);
+    let lookup_keys = preferred_nvos_lookup_keys(id, config, ctx);
+    let mut hardware_types = vec![desired_hw_type.clone()];
+    if !desired_hw_type.is_any() {
+        hardware_types.push(RackHardwareType::any());
+    }
+
+    let mut conn = ctx.services.db_pool.acquire().await.map_err(|e| {
+        StateHandlerError::GenericError(eyre::eyre!(
+            "failed to acquire db connection for NVOS lookup: {}",
+            e
+        ))
+    })?;
+
+    for rack_hardware_type in hardware_types {
+        let firmware_rows = db_rack_firmware::list_all(
+            &mut conn,
+            RackFirmwareSearchFilter {
+                only_available: true,
+                rack_hardware_type: Some(rack_hardware_type),
+            },
+        )
+        .await
+        .map_err(|e| StateHandlerError::GenericError(eyre::eyre!(e.to_string())))?;
+
+        for firmware in firmware_rows.into_iter().filter(|fw| fw.is_default) {
+            if let Some(artifact) = resolve_nvos_artifact_from_firmware(&firmware, &lookup_keys)? {
+                return Ok(Some(artifact));
+            }
+        }
+    }
+
+    Ok(None)
 }
 
 async fn clear_rack_firmware_device_statuses(
@@ -372,6 +519,70 @@ async fn rms_get_firmware_upgrade_status(
     Ok(updated)
 }
 
+/// Stub: call RMS to start a switch-only NVOS update for the given rack.
+fn rms_start_nvos_update(
+    rack_id: &RackId,
+    artifact: &ResolvedNvosArtifact,
+    switches: Vec<NvosUpdateSwitchInfo>,
+) -> Result<NvosUpdateJob, StateHandlerError> {
+    tracing::info!(
+        "RMS stub: starting NVOS update for rack {} — {} switches using firmware {} ({})",
+        rack_id,
+        switches.len(),
+        artifact.firmware_id,
+        artifact.image_filename,
+    );
+
+    for switch in &switches {
+        tracing::debug!(
+            "RMS stub: switch mac={} bmc_ip={} nvos_ip={} user={}",
+            switch.mac,
+            switch.bmc_ip,
+            switch.nvos_ip,
+            switch.nvos_username,
+        );
+    }
+
+    Ok(NvosUpdateJob {
+        job_id: Some(format!(
+            "nvos-{}-{}",
+            rack_id,
+            chrono::Utc::now().format("%Y%m%d-%H%M%S")
+        )),
+        firmware_id: artifact.firmware_id.clone(),
+        image_filename: artifact.image_filename.clone(),
+        local_file_path: artifact.local_file_path.clone(),
+        version: artifact.version.clone(),
+        status: Some("in_progress".into()),
+        started_at: Some(chrono::Utc::now()),
+        completed_at: None,
+        switches: switches
+            .into_iter()
+            .map(|switch| NvosUpdateSwitchStatus {
+                mac: switch.mac,
+                bmc_ip: switch.bmc_ip,
+                nvos_ip: switch.nvos_ip,
+                status: "pending".into(),
+            })
+            .collect(),
+    })
+}
+
+/// Stub: poll RMS for the current status of a switch-only NVOS update job.
+fn rms_get_nvos_update_status(job: &NvosUpdateJob) -> Result<NvosUpdateJob, StateHandlerError> {
+    let mut updated = job.clone();
+    for switch in updated.all_switches_mut() {
+        switch.status = "completed".into();
+    }
+    updated.status = Some("completed".into());
+    updated.completed_at = Some(chrono::Utc::now());
+    tracing::info!(
+        "RMS stub: NVOS job {} polled — all switches completed",
+        job.job_id.as_deref().unwrap_or("?")
+    );
+    Ok(updated)
+}
+
 pub async fn handle_maintenance(
     id: &RackId,
     state: &mut Rack,
@@ -631,13 +842,209 @@ pub async fn handle_maintenance(
                 }
 
                 tracing::info!(
-                    "Rack {} firmware upgrade complete ({}/{} devices), advancing to ConfigureNmxCluster",
+                    "Rack {} firmware upgrade complete ({}/{} devices)",
                     id,
                     completed,
                     total
                 );
                 db_rack::update_firmware_upgrade_job(txn.as_mut(), id, None).await?;
                 state.firmware_upgrade_job = None;
+
+                let next_maintenance_state =
+                    if resolve_default_nvos_artifact(id, config, ctx).await?.is_some() {
+                        tracing::info!(
+                            "Rack {} has a default NVOS artifact available; advancing to NVOSUpdate(Start)",
+                            id
+                        );
+                        RackMaintenanceState::NVOSUpdate {
+                            nvos_update: NvosUpdateState::Start,
+                        }
+                    } else {
+                        tracing::info!(
+                            "Rack {} has no default NVOS artifact available; skipping NVOSUpdate",
+                            id
+                        );
+                        RackMaintenanceState::ConfigureNmxCluster
+                    };
+
+                Ok(StateHandlerOutcome::transition(RackState::Maintenance {
+                    maintenance_state: next_maintenance_state,
+                })
+                .with_txn(txn))
+            }
+        },
+        RackMaintenanceState::NVOSUpdate { nvos_update } => match nvos_update {
+            NvosUpdateState::Start => {
+                let Some(artifact) = resolve_default_nvos_artifact(id, config, ctx).await? else {
+                    tracing::info!(
+                        "Rack {} NVOS update requested but no default NVOS artifact is available; advancing to ConfigureNmxCluster",
+                        id
+                    );
+                    return Ok(StateHandlerOutcome::transition(RackState::Maintenance {
+                        maintenance_state: RackMaintenanceState::ConfigureNmxCluster,
+                    }));
+                };
+
+                tracing::info!(
+                    "Rack {} NVOS update starting with firmware {} ({})",
+                    id,
+                    artifact.firmware_id,
+                    artifact.image_filename,
+                );
+
+                let switch_endpoints = {
+                    let mut txn = ctx.services.db_pool.begin().await?;
+                    let switch_ids = db_switch::find_ids(
+                        txn.as_mut(),
+                        model::switch::SwitchSearchFilter {
+                            rack_id: Some(id.clone()),
+                            ..Default::default()
+                        },
+                    )
+                    .await?;
+                    let switch_endpoints =
+                        db_switch::find_switch_endpoints_by_ids(txn.as_mut(), &switch_ids).await?;
+                    txn.commit().await?;
+                    switch_endpoints
+                };
+
+                let cred_mgr = ctx.services.credential_manager.as_ref();
+                let mut switches = Vec::with_capacity(switch_endpoints.len());
+                for switch in &switch_endpoints {
+                    let nvos_ip = switch.nvos_ip.ok_or_else(|| {
+                        StateHandlerError::GenericError(eyre::eyre!(
+                            "switch {} has no NVOS IP for rack NVOS update",
+                            switch.bmc_mac
+                        ))
+                    })?;
+                    let (nvos_username, nvos_password) =
+                        fetch_nvos_credentials(cred_mgr, switch.bmc_mac).await.ok_or_else(|| {
+                            StateHandlerError::GenericError(eyre::eyre!(
+                                "no NVOS admin credentials in vault for switch {}",
+                                switch.bmc_mac
+                            ))
+                        })?;
+                    switches.push(NvosUpdateSwitchInfo {
+                        mac: switch.bmc_mac.to_string(),
+                        bmc_ip: switch.bmc_ip.to_string(),
+                        nvos_ip: nvos_ip.to_string(),
+                        nvos_username,
+                        nvos_password,
+                    });
+                }
+
+                let job = rms_start_nvos_update(id, &artifact, switches)?;
+
+                let mut txn = ctx.services.db_pool.begin().await?;
+                db_rack::update_nvos_update_job(txn.as_mut(), id, Some(&job)).await?;
+                state.nvos_update_job = Some(job);
+
+                Ok(StateHandlerOutcome::transition(RackState::Maintenance {
+                    maintenance_state: RackMaintenanceState::NVOSUpdate {
+                        nvos_update: NvosUpdateState::WaitForComplete,
+                    },
+                })
+                .with_txn(txn))
+            }
+            NvosUpdateState::WaitForComplete => {
+                let current_job = match &state.nvos_update_job {
+                    Some(job) => job,
+                    None => {
+                        return Ok(StateHandlerOutcome::wait(
+                            "nvos update: no job recorded yet".into(),
+                        ));
+                    }
+                };
+
+                let job = rms_get_nvos_update_status(current_job)?;
+                let mut txn = ctx.services.db_pool.begin().await?;
+
+                let build_status = |switch: &NvosUpdateSwitchStatus| -> RackNvosUpdateStatus {
+                    let status = match switch.status.as_str() {
+                        "completed" => RackNvosUpdateState::Completed,
+                        "failed" => RackNvosUpdateState::Failed {
+                            cause: format!("RMS reported NVOS failure for {}", switch.mac),
+                        },
+                        "in_progress" => RackNvosUpdateState::InProgress,
+                        _ => RackNvosUpdateState::Started,
+                    };
+
+                    RackNvosUpdateStatus {
+                        task_id: job.job_id.clone().unwrap_or_else(|| "unknown".to_string()),
+                        firmware_id: job.firmware_id.clone(),
+                        image_filename: job.image_filename.clone(),
+                        status,
+                        started_at: job.started_at,
+                        ended_at: if switch.status == "completed" || switch.status == "failed" {
+                            Some(chrono::Utc::now())
+                        } else {
+                            None
+                        },
+                    }
+                };
+
+                for switch in job.switches.iter() {
+                    let mac: mac_address::MacAddress = match switch.mac.parse() {
+                        Ok(mac) => mac,
+                        Err(_) => continue,
+                    };
+                    if let Some(switch_id) = db_switch::find_ids(
+                        txn.as_mut(),
+                        model::switch::SwitchSearchFilter {
+                            bmc_mac: Some(mac),
+                            rack_id: Some(id.clone()),
+                            ..Default::default()
+                        },
+                    )
+                    .await?
+                    .first()
+                    .copied()
+                    {
+                        let nvos_status = build_status(switch);
+                        db_switch::update_nvos_update_status(
+                            txn.as_mut(),
+                            switch_id,
+                            Some(&nvos_status),
+                        )
+                        .await?;
+                    }
+                }
+
+                let total = job.all_switches().count();
+                let completed = job
+                    .all_switches()
+                    .filter(|switch| switch.status == "completed")
+                    .count();
+                let failed = job
+                    .all_switches()
+                    .filter(|switch| switch.status == "failed")
+                    .count();
+
+                if failed > 0 {
+                    return Ok(StateHandlerOutcome::transition(RackState::Error {
+                        cause: format!("NVOS update failed: {}/{} switches failed", failed, total),
+                    })
+                    .with_txn(txn));
+                }
+
+                if completed < total {
+                    db_rack::update_nvos_update_job(txn.as_mut(), id, Some(&job)).await?;
+                    state.nvos_update_job = Some(job);
+                    return Ok(StateHandlerOutcome::wait(format!(
+                        "nvos update: {}/{} switches completed",
+                        completed, total
+                    ))
+                    .with_txn(txn));
+                }
+
+                tracing::info!(
+                    "Rack {} NVOS update complete ({}/{} switches), advancing to ConfigureNmxCluster",
+                    id,
+                    completed,
+                    total
+                );
+                db_rack::update_nvos_update_job(txn.as_mut(), id, None).await?;
+                state.nvos_update_job = None;
                 Ok(StateHandlerOutcome::transition(RackState::Maintenance {
                     maintenance_state: RackMaintenanceState::ConfigureNmxCluster,
                 })
