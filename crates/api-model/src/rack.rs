@@ -431,7 +431,9 @@ pub enum RackMaintenanceState {
     NVOSUpdate {
         nvos_update: NvosUpdateState,
     },
-    ConfigureNmxCluster,
+    ConfigureNmxCluster {
+        configure_nmx_cluster: ConfigureNmxClusterState,
+    },
     PowerSequence {
         rack_power: RackPowerState,
     },
@@ -449,11 +451,36 @@ impl Display for RackMaintenanceState {
             RackMaintenanceState::NVOSUpdate { nvos_update } => {
                 write!(f, "NVOSUpdate({})", nvos_update)
             }
-            RackMaintenanceState::ConfigureNmxCluster => write!(f, "ConfigureNmxCluster"),
+            RackMaintenanceState::ConfigureNmxCluster {
+                configure_nmx_cluster,
+            } => {
+                write!(f, "ConfigureNmxCluster({})", configure_nmx_cluster)
+            }
             RackMaintenanceState::PowerSequence { rack_power } => {
                 write!(f, "PowerSequence({})", rack_power)
             }
             RackMaintenanceState::Completed => write!(f, "Completed"),
+        }
+    }
+}
+
+/// Sub-states of `RackMaintenanceState::ConfigureNmxCluster`.
+///
+/// `Start` selects a primary switch and asks RMS to configure the
+/// NMX cluster. `WaitForFabricStatus` polls
+/// `GetScaleUpFabricServicesStatus` and persists the per-switch
+/// `fabric_manager_status` before advancing.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ConfigureNmxClusterState {
+    Start,
+    WaitForFabricStatus,
+}
+
+impl Display for ConfigureNmxClusterState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ConfigureNmxClusterState::Start => write!(f, "Start"),
+            ConfigureNmxClusterState::WaitForFabricStatus => write!(f, "WaitForFabricStatus"),
         }
     }
 }
