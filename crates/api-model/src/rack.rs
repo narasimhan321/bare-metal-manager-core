@@ -216,6 +216,18 @@ impl SwitchNvosUpdateStatus {
     pub fn is_in_progress(&self) -> bool {
         self.ended_at.is_none()
     }
+
+    pub fn is_terminal(&self) -> bool {
+        matches!(
+            self.status,
+            SwitchNvosUpdateState::Completed | SwitchNvosUpdateState::Failed { .. }
+        )
+    }
+
+    pub fn is_current_for(&self, requested_at: DateTime<Utc>) -> bool {
+        self.ended_at.is_some_and(|ts| ts >= requested_at)
+            || self.started_at.is_some_and(|ts| ts >= requested_at)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

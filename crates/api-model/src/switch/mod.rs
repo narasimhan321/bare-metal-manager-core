@@ -417,10 +417,15 @@ pub enum BomValidatingState {
 
 /// Sub-state for SwitchControllerState::ReProvisioning
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[allow(clippy::enum_variant_names)]
 pub enum ReProvisioningState {
     /// Rack-level firmware upgrade in progress; the rack state machine manages the
     /// upgrade and clears `switch_reprovisioning_requested` when done.
     WaitingForRackFirmwareUpgrade,
+    /// Rack-level NVOS upgrade in progress.
+    WaitingForNVOSUpgrade,
+    /// Rack-level NMX-C configuration in progress.
+    WaitingForNMXCConfigure,
 }
 
 /// State of a Switch as tracked by the controller
