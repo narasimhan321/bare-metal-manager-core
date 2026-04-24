@@ -506,6 +506,7 @@ pub struct SwitchSearchFilter {
     pub deleted: crate::DeletedFilter,
     pub controller_state: Option<String>,
     pub bmc_mac: Option<MacAddress>,
+    pub nvos_mac: Option<MacAddress>,
 }
 
 impl From<rpc::SwitchSearchFilter> for SwitchSearchFilter {
@@ -515,6 +516,7 @@ impl From<rpc::SwitchSearchFilter> for SwitchSearchFilter {
             deleted: crate::DeletedFilter::from(filter.deleted),
             controller_state: filter.controller_state,
             bmc_mac: filter.bmc_mac.and_then(|m| m.parse::<MacAddress>().ok()),
+            nvos_mac: filter.nvos_mac.and_then(|m| m.parse::<MacAddress>().ok()),
         }
     }
 }

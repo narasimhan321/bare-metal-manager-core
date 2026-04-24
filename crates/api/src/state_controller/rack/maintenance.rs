@@ -1203,7 +1203,7 @@ pub async fn handle_maintenance(
                 }
 
                 db_rack::update_firmware_upgrade_job(txn.as_mut(), id, None).await?;
-                state.firmware_upgrade_job = None;
+                // state.firmware_upgrade_job = None;
 
                 let next_maintenance_state = if let Some(artifact) = default_nvos_artifact {
                     tracing::info!(
@@ -1365,7 +1365,7 @@ pub async fn handle_maintenance(
                     if let Some(switch_id) = db_switch::find_ids(
                         txn.as_mut(),
                         model::switch::SwitchSearchFilter {
-                            bmc_mac: Some(mac),
+                            nvos_mac: Some(mac),
                             rack_id: Some(id.clone()),
                             ..Default::default()
                         },
@@ -1381,6 +1381,11 @@ pub async fn handle_maintenance(
                             Some(&nvos_status),
                         )
                         .await?;
+                    } else {
+                        tracing::error!(
+                            "switch {} not found in database for NVOS update",
+                            switch.mac
+                        );
                     }
                 }
 
