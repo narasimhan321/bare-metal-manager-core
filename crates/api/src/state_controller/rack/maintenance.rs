@@ -1457,8 +1457,7 @@ pub async fn handle_maintenance(
                     next_state = %next,
                     "Rack NVOS update complete, advancing"
                 );
-                db_rack::update_nvos_update_job(txn.as_mut(), id, None).await?;
-                state.nvos_update_job = None;
+                db_rack::update_nvos_update_job(txn.as_mut(), id, Some(&job)).await?;
                 Ok(StateHandlerOutcome::transition(RackState::Maintenance {
                     maintenance_state: next,
                 })
