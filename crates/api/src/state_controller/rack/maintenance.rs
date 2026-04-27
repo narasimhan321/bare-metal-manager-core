@@ -1392,7 +1392,7 @@ pub async fn handle_maintenance(
                     if let Some(switch_id) = db_switch::find_ids(
                         txn.as_mut(),
                         model::switch::SwitchSearchFilter {
-                            nvos_mac: Some(mac),
+                            bmc_mac: Some(mac),
                             rack_id: Some(id.clone()),
                             ..Default::default()
                         },
