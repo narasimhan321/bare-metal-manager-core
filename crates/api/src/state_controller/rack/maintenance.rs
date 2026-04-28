@@ -1385,22 +1385,29 @@ pub async fn handle_maintenance(
                 };
 
                 for switch in job.switches.iter() {
-                    let mac: mac_address::MacAddress = match switch.mac.parse() {
-                        Ok(mac) => mac,
-                        Err(_) => continue,
+                    let switch_id = if !switch.node_id.is_empty() {
+                        switch
+                            .node_id
+                            .parse::<carbide_uuid::switch::SwitchId>()
+                            .ok()
+                    } else {
+                        let mac: mac_address::MacAddress = match switch.mac.parse() {
+                            Ok(mac) => mac,
+                            Err(_) => continue,
+                        };
+                        db_switch::find_ids(
+                            txn.as_mut(),
+                            model::switch::SwitchSearchFilter {
+                                bmc_mac: Some(mac),
+                                rack_id: Some(id.clone()),
+                                ..Default::default()
+                            },
+                        )
+                        .await?
+                        .first()
+                        .copied()
                     };
-                    if let Some(switch_id) = db_switch::find_ids(
-                        txn.as_mut(),
-                        model::switch::SwitchSearchFilter {
-                            bmc_mac: Some(mac),
-                            rack_id: Some(id.clone()),
-                            ..Default::default()
-                        },
-                    )
-                    .await?
-                    .first()
-                    .copied()
-                    {
+                    if let Some(switch_id) = switch_id {
                         let nvos_status = build_status(switch);
                         db_switch::update_nvos_update_status(
                             txn.as_mut(),
